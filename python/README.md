@@ -24,6 +24,14 @@ Requires Python 3.11 through 3.15.
 pip install composio
 ```
 
+Tool execution can emit an OpenTelemetry span. That package is not part of `pip install composio`. Install it when you want those spans in your existing trace:
+
+```bash
+pip install opentelemetry-api
+```
+
+With no OpenTelemetry API installed, execution is unchanged. The SDK does not install an exporter. It uses the tracer provider you already configured.
+
 ## Configure your API key
 
 Get a project API key from your project's **Settings > API Keys** in the dashboard. The [quickstart](https://docs.composio.dev/docs/quickstart) shows the setup.
@@ -101,7 +109,7 @@ from composio import Composio
 composio = Composio()
 
 session = composio.create(user_id="user_123", mcp=True)
-print(session.mcp.url)      # MCP endpoint for this session
+print(session.mcp.url)  # MCP endpoint for this session
 print(session.mcp.headers)  # auth headers for the endpoint
 ```
 
@@ -136,9 +144,11 @@ trigger = composio.triggers.create(
 
 subscription = composio.triggers.subscribe()
 
+
 @subscription.handle(trigger_id=trigger.trigger_id)
 def handle_event(data):
     print("Event received:", data)
+
 
 subscription.wait_forever()
 ```

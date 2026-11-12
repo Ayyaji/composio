@@ -23,6 +23,7 @@ _ALLOWED_ATTRIBUTES = {
     "gen_ai.tool.name",
     "composio.toolkit.slug",
     "composio.tool.version",
+    "error.type",
 }
 _SUCCESS = {"data": {}, "error": None, "successful": True}
 
@@ -77,12 +78,18 @@ def span_attributes(span):
 
 
 def assert_private(span, *secrets: str) -> None:
-    """Span attributes and status text stay inside the allowlist."""
+    """Span attributes, status text, and events stay inside the allowlist."""
     attributes = span.attributes
     assert attributes is not None
     assert set(attributes).issubset(_ALLOWED_ATTRIBUTES)
-    rendered = " ".join(str(value) for value in attributes.values())
-    rendered = f"{rendered} {span.status.description or ''}"
+    parts = [str(value) for value in attributes.values()]
+    if span.status.description:
+        parts.append(span.status.description)
+    for event in span.events:
+        parts.append(event.name)
+        if event.attributes:
+            parts.extend(str(value) for value in event.attributes.values())
+    rendered = " ".join(parts)
     for secret in secrets:
         assert secret not in rendered
 
@@ -98,6 +105,7 @@ def test_execute_creates_span(exporter):
     assert attributes["gen_ai.tool.name"] == "GITHUB_CREATE_ISSUE"
     assert attributes["composio.toolkit.slug"] == "github"
     assert span.status.status_code == StatusCode.UNSET
+    assert "error.type" not in attributes
     assert_private(span, "secret", "u1")
 
 
@@ -106,20 +114,28 @@ def test_failed_result_marks_span_error(exporter):
     tools.execute("GITHUB_CREATE_ISSUE", {"title": "secret"}, user_id="u1")
 
     span = one_span(exporter)
+    attributes = span_attributes(span)
     assert span.status.status_code == StatusCode.ERROR
+    assert attributes["error.type"] == "tool_error"
+    assert span.status.description == "tool execution failed"
+    assert list(span.events) == []
     assert_private(span, "secret", "u1", "401")
 
 
 def test_raised_error_marks_span_error(exporter):
     tools = make_tools(_SUCCESS)
-    tools._execute_tool.side_effect = RuntimeError("boom")
+    tools._execute_tool.side_effect = RuntimeError("bad title secret")
 
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(RuntimeError, match="bad title secret"):
         tools.execute("GITHUB_CREATE_ISSUE", {"title": "secret"}, user_id="u1")
 
     span = one_span(exporter)
+    attributes = span_attributes(span)
     assert span.status.status_code == StatusCode.ERROR
-    assert_private(span, "secret", "u1")
+    assert attributes["error.type"] == "RuntimeError"
+    assert span.status.description == "tool execution failed"
+    assert list(span.events) == []
+    assert_private(span, "secret", "u1", "bad title secret")
 
 
 def test_no_arguments_or_user_on_span(exporter):
@@ -236,6 +252,7 @@ def test_session_execute_creates_span(exporter):
     assert attributes["gen_ai.tool.name"] == "GITHUB_CREATE_ISSUE"
     assert "composio.toolkit.slug" not in attributes
     assert span.status.status_code == StatusCode.UNSET
+    assert "error.type" not in attributes
     assert_private(span, "secret", "u1", "ca_secret")
 
 
@@ -250,7 +267,11 @@ def test_session_failed_result_marks_span_error(exporter, result_type):
         session.execute("GITHUB_CREATE_ISSUE", arguments={"title": "secret"})
 
     span = one_span(exporter)
+    attributes = span_attributes(span)
     assert span.status.status_code == StatusCode.ERROR
+    assert attributes["error.type"] == "tool_error"
+    assert span.status.description == "tool execution failed"
+    assert list(span.events) == []
     assert_private(span, "secret", "u1", "401")
 
 
