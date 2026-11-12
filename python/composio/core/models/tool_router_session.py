@@ -36,6 +36,7 @@ from composio.client.types import (
     session_config_history_params,
     session_config_history_response,
 )
+from composio.core._otel import execute_tool_span, mark_failed, note_toolkit_slug
 from composio.core.models._modifiers import Modifiers, apply_modifier_by_type
 from composio.core.models.connected_accounts import ConnectionRequest
 from composio.core.models.custom_tool import (
@@ -1048,37 +1049,50 @@ class ToolRouterSession(t.Generic[TTool, TToolCollection]):
         :raises ValidationError: If the API response carries no ``result_type``,
             or one this SDK does not know.
         """
-        # Check if this is a local tool (by original or final slug)
-        entry = find_custom_tool(self._custom_tools_map, tool_slug)
-        if entry and self._session_context:
-            result = execute_custom_tool(entry, arguments or {}, self._session_context)
-            return ToolRouterSessionExecuteResponse(
-                data=result["data"],
-                error=result["error"],
-                log_id="",
-                result_type="completed" if result["successful"] else "failed",
-            )
+        with execute_tool_span(tool_slug) as span:
+            # Check if this is a local tool (by original or final slug)
+            entry = find_custom_tool(self._custom_tools_map, tool_slug)
+            if entry is not None:
+                note_toolkit_slug(span, entry.toolkit)
+            if entry and self._session_context:
+                result = execute_custom_tool(
+                    entry, arguments or {}, self._session_context
+                )
+                response = ToolRouterSessionExecuteResponse(
+                    data=result["data"],
+                    error=result["error"],
+                    log_id="",
+                    result_type="completed" if result["successful"] else "failed",
+                )
+                # A failed custom tool returns instead of raising. Do not copy
+                # ``error`` onto the span; it can echo tool output.
+                if response.result_type in ("failed", "blocked"):
+                    mark_failed(span, "tool execution failed")
+                return response
 
-        assert_unambiguous_custom_tool_slug(self._custom_tools_map, tool_slug)
+            assert_unambiguous_custom_tool_slug(self._custom_tools_map, tool_slug)
 
-        # Disable retries: a session execution is a non-idempotent write, and a
-        # silent retry after a read timeout can duplicate the side effect.
-        return require_execute_result(
-            self._client.without_retries.tool_router.session.execute(
-                session_id=self.session_id,
-                tool_slug=tool_slug,
-                arguments=arguments if arguments is not None else omit,
-                account=account if account is not None else omit,
-                input_responses=(
-                    input_responses if input_responses is not None else omit
+            # Disable retries: a session execution is a non-idempotent write, and a
+            # silent retry after a read timeout can duplicate the side effect.
+            response = require_execute_result(
+                self._client.without_retries.tool_router.session.execute(
+                    session_id=self.session_id,
+                    tool_slug=tool_slug,
+                    arguments=arguments if arguments is not None else omit,
+                    account=account if account is not None else omit,
+                    input_responses=(
+                        input_responses if input_responses is not None else omit
+                    ),
+                    request_state=request_state if request_state is not None else omit,
+                    experimental=self._inline_custom_tools_payload
+                    if self._inline_custom_tools_payload is not None
+                    else omit,
                 ),
-                request_state=request_state if request_state is not None else omit,
-                experimental=self._inline_custom_tools_payload
-                if self._inline_custom_tools_payload is not None
-                else omit,
-            ),
-            tool_slug,
-        )
+                tool_slug,
+            )
+            if response.result_type in ("failed", "blocked"):
+                mark_failed(span, "tool execution failed")
+            return response
 
     def execute_meta(
         self,

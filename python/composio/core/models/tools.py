@@ -10,8 +10,8 @@ from composio_client import APIStatusError, omit
 from composio_client.types.tool_router.session_execute_meta_response import (
     SessionExecuteMetaBlockedResponse,
     SessionExecuteMetaInputRequiredResponse,
-    SessionExecuteMetaResult,
     SessionExecuteMetaResponse,
+    SessionExecuteMetaResult,
 )
 from composio_client.types.tool_router.session_execute_response import (
     SessionExecuteBlockedResponse,
@@ -31,6 +31,12 @@ from composio.client.types import (
     tool_execute_params,
     tool_proxy_params,
     tool_proxy_response,
+)
+from composio.core._otel import (
+    execute_tool_span,
+    mark_failed,
+    note_tool_version,
+    note_toolkit_slug,
 )
 from composio.core.models._files import FileHelper
 from composio.core.models.base import Resource
@@ -814,6 +820,8 @@ class Tools(Resource, t.Generic[TTool, TToolCollection]):
             # Use instance-level toolkit versions configuration
             version = get_toolkit_version(toolkit_slug, self._toolkit_versions)
 
+        note_tool_version(version)
+
         # Check if the version is 'latest' and dangerously_skip_version_check is not True
         # If so, raise an error to prevent unexpected behavior
         if version == "latest" and not dangerously_skip_version_check:
@@ -875,102 +883,109 @@ class Tools(Resource, t.Generic[TTool, TToolCollection]):
         :return: The response from the tool.
         """
 
-        tool = self._tool_schemas.get(slug)
+        with execute_tool_span(slug) as span:
+            tool = self._tool_schemas.get(slug)
 
-        if tool is None:
-            tool = self.get_raw_composio_tool_by_slug(slug)
-            self._tool_schemas[slug] = tool
+            if tool is None:
+                tool = self.get_raw_composio_tool_by_slug(slug)
+                self._tool_schemas[slug] = tool
 
-        if self._auto_upload_download_files:
-            tk = _toolkit_slug(tool, "unknown")
-            bfu = merge_before_file_upload(
-                modifiers,
-                tool=slug,
-                toolkit=tk,
-            )
-            arguments = self._file_helper.substitute_file_uploads(
-                tool=tool,
-                request=arguments,
-                before_file_upload=bfu,
-            )
-        else:
-            # Auto-upload is opt-in, but "no file" must still be sent as an
-            # omitted key rather than ``""`` (issue #4233). Explicit ``None``
-            # remains valid for nullable file inputs.
-            arguments = self._file_helper.drop_empty_file_uploads(
-                tool=tool, request=arguments
-            )
+            note_toolkit_slug(span, _toolkit_slug(tool, ""))
 
-        if modifiers is not None:
-            type_before_exec: t.Literal["before_execute"] = "before_execute"
-            request_params: ToolExecuteParams = {
-                "arguments": arguments,
-            }
-            if connected_account_id is not None:
-                request_params["connected_account_id"] = connected_account_id
-            if custom_auth_params is not None:
-                request_params["custom_auth_params"] = custom_auth_params
-            if custom_connection_data is not None:
-                request_params["custom_connection_data"] = custom_connection_data
-            if version is not None:
-                request_params["version"] = version
-            if text is not None:
-                request_params["text"] = text
-            if user_id is not None:
-                request_params["user_id"] = user_id
-            if dangerously_skip_version_check is not None:
-                request_params["dangerously_skip_version_check"] = (
-                    dangerously_skip_version_check
+            if self._auto_upload_download_files:
+                tk = _toolkit_slug(tool, "unknown")
+                bfu = merge_before_file_upload(
+                    modifiers,
+                    tool=slug,
+                    toolkit=tk,
                 )
-            processed_params = apply_modifier_by_type(
-                modifiers=modifiers,
-                toolkit=_toolkit_slug(tool, "unknown"),
-                tool=slug,
-                type=type_before_exec,
-                request=request_params,
-            )
-            connected_account_id = processed_params.get(
-                "connected_account_id", connected_account_id
-            )
-            custom_auth_params = processed_params.get(
-                "custom_auth_params", custom_auth_params
-            )
-            custom_connection_data = processed_params.get(
-                "custom_connection_data", custom_connection_data
-            )
-            text = processed_params.get("text", text)
-            version = processed_params.get("version", version)
-            user_id = processed_params.get("user_id", user_id)
-            arguments = processed_params["arguments"]
-            dangerously_skip_version_check = processed_params.get(
-                "dangerously_skip_version_check", dangerously_skip_version_check
-            )
-        response = self._execute_tool(
-            slug=slug,
-            arguments=arguments,
-            tool=tool,
-            connected_account_id=connected_account_id,
-            custom_auth_params=custom_auth_params,
-            custom_connection_data=custom_connection_data,
-            user_id=user_id,
-            text=text,
-            version=version,
-            dangerously_skip_version_check=dangerously_skip_version_check,
-        )
-        if self._auto_upload_download_files:
-            response = self._file_helper.substitute_file_downloads(
+                arguments = self._file_helper.substitute_file_uploads(
+                    tool=tool,
+                    request=arguments,
+                    before_file_upload=bfu,
+                )
+            else:
+                # Auto-upload is opt-in, but "no file" must still be sent as an
+                # omitted key rather than ``""`` (issue #4233). Explicit ``None``
+                # remains valid for nullable file inputs.
+                arguments = self._file_helper.drop_empty_file_uploads(
+                    tool=tool, request=arguments
+                )
+
+            if modifiers is not None:
+                type_before_exec: t.Literal["before_execute"] = "before_execute"
+                request_params: ToolExecuteParams = {
+                    "arguments": arguments,
+                }
+                if connected_account_id is not None:
+                    request_params["connected_account_id"] = connected_account_id
+                if custom_auth_params is not None:
+                    request_params["custom_auth_params"] = custom_auth_params
+                if custom_connection_data is not None:
+                    request_params["custom_connection_data"] = custom_connection_data
+                if version is not None:
+                    request_params["version"] = version
+                if text is not None:
+                    request_params["text"] = text
+                if user_id is not None:
+                    request_params["user_id"] = user_id
+                if dangerously_skip_version_check is not None:
+                    request_params["dangerously_skip_version_check"] = (
+                        dangerously_skip_version_check
+                    )
+                processed_params = apply_modifier_by_type(
+                    modifiers=modifiers,
+                    toolkit=_toolkit_slug(tool, "unknown"),
+                    tool=slug,
+                    type=type_before_exec,
+                    request=request_params,
+                )
+                connected_account_id = processed_params.get(
+                    "connected_account_id", connected_account_id
+                )
+                custom_auth_params = processed_params.get(
+                    "custom_auth_params", custom_auth_params
+                )
+                custom_connection_data = processed_params.get(
+                    "custom_connection_data", custom_connection_data
+                )
+                text = processed_params.get("text", text)
+                version = processed_params.get("version", version)
+                user_id = processed_params.get("user_id", user_id)
+                arguments = processed_params["arguments"]
+                dangerously_skip_version_check = processed_params.get(
+                    "dangerously_skip_version_check", dangerously_skip_version_check
+                )
+            response = self._execute_tool(
+                slug=slug,
+                arguments=arguments,
                 tool=tool,
-                response=response,
+                connected_account_id=connected_account_id,
+                custom_auth_params=custom_auth_params,
+                custom_connection_data=custom_connection_data,
+                user_id=user_id,
+                text=text,
+                version=version,
+                dangerously_skip_version_check=dangerously_skip_version_check,
             )
-        if modifiers is not None:
-            response = apply_modifier_by_type(
-                modifiers=modifiers,
-                toolkit=_toolkit_slug(tool, "unknown"),
-                tool=slug,
-                type="after_execute",
-                response=response,
-            )
-        return response
+            if self._auto_upload_download_files:
+                response = self._file_helper.substitute_file_downloads(
+                    tool=tool,
+                    response=response,
+                )
+            if modifiers is not None:
+                response = apply_modifier_by_type(
+                    modifiers=modifiers,
+                    toolkit=_toolkit_slug(tool, "unknown"),
+                    tool=slug,
+                    type="after_execute",
+                    response=response,
+                )
+            if response.get("successful") is False:
+                # A failed tool returns instead of raising, so the span would
+                # stay UNSET. Keep the result payload off the span.
+                mark_failed(span, "tool execution failed")
+            return response
 
     def proxy(
         self,
