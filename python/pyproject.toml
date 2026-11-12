@@ -63,6 +63,8 @@ dev = [
     "semver>=3.0.4",
     # CrewAI 1.x currently constrains Tomli to the 2.0 line.
     "tomli>=2.0.2,<2.1",
+    "opentelemetry-api>=1.42.1",
+    "opentelemetry-sdk>=1.42.1",
 ]
 # Docs examples use this locked group instead of an unlocked `uv run --with`
 # overlay. Keep the mypy version in sync with noxfile.py.
