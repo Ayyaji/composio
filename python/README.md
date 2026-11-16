@@ -132,7 +132,7 @@ from composio import Composio
 composio = Composio()
 
 session = composio.create(user_id="user_123", mcp=True)
-print(session.mcp.url)  # MCP endpoint for this session
+print(session.mcp.url)      # MCP endpoint for this session
 print(session.mcp.headers)  # auth headers for the endpoint
 ```
 
@@ -167,11 +167,9 @@ trigger = composio.triggers.create(
 
 subscription = composio.triggers.subscribe()
 
-
 @subscription.handle(trigger_id=trigger.trigger_id)
 def handle_event(data):
     print("Event received:", data)
-
 
 subscription.wait_forever()
 ```
